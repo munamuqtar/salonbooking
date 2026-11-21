@@ -1,0 +1,138 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserData().role == 'ADMIN';
+    }
+
+    function isSalonOwner() {
+      return isAuthenticated() && getUserData().role == 'SALON_OWNER';
+    }
+
+    // --- USERS COLLECTION ---
+    match /users/{userId} {
+      // Any authenticated user can read profiles; public users cannot read private details
+      allow read: if isAuthenticated();
+
+      // Client can only create their own user document and CANNOT assign themselves ADMIN
+      allow create: if isOwner(userId)
+                    && request.resource.data.uid == userId
+                    && request.resource.data.role != 'ADMIN'
+                    && request.resource.data.isActive == true;
+
+      // Users can update their own personal info (name, phone, photoUrl), but CANNOT change role or active status
+      allow update: if (isOwner(userId)
+                        && request.resource.data.role == resource.data.role
+                        && request.resource.data.isActive == resource.data.isActive)
+                    || isAdmin();
+
+      // Only administrators can delete user records
+      allow delete: if isAdmin();
+    }
+
+    // --- SALONS COLLECTION ---
+    match /salons/{salonId} {
+      // Anyone can read active & approved salons; admins/owners can read their unapproved salons
+      allow read: if resource.data.approvalStatus == 'APPROVED' && resource.data.isActive == true
+                  || (isAuthenticated() && (resource.data.ownerId == request.auth.uid || isAdmin()));
+
+      // Salon owners can request salon creation with PENDING approval status
+      allow create: if isSalonOwner()
+                    && request.resource.data.ownerId == request.auth.uid
+                    && request.resource.data.approvalStatus == 'PENDING'
+                    || isAdmin();
+
+      // Owners can update salon information but cannot alter approvalStatus
+      allow update: if (isSalonOwner()
+                        && resource.data.ownerId == request.auth.uid
+                        && request.resource.data.approvalStatus == resource.data.approvalStatus)
+                    || isAdmin();
+
+      allow delete: if isAdmin();
+    }
+
+    // --- CATEGORIES COLLECTION ---
+    match /categories/{categoryId} {
+      // Public read for active categories
+      allow read: if true;
+      // Only administrators can create or edit service categories
+      allow write: if isAdmin();
+    }
+
+    // --- SERVICES COLLECTION ---
+    match /services/{serviceId} {
+      allow read: if true;
+      // Salon owners can manage services for their own salon
+      allow create, update, delete: if isSalonOwner() || isAdmin();
+    }
+
+    // --- PROFESSIONALS COLLECTION ---
+    match /professionals/{professionalId} {
+      allow read: if true;
+      allow write: if isSalonOwner() || isAdmin();
+    }
+
+    // --- BOOKINGS COLLECTION ---
+    match /bookings/{bookingId} {
+      // Customer who booked, assigned salon owner, assigned professional, or admin can read
+      allow read: if isAuthenticated() && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.salonOwnerId == request.auth.uid ||
+        resource.data.professionalId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Customers can create bookings in PENDING state
+      allow create: if isAuthenticated()
+                    && request.resource.data.customerId == request.auth.uid
+                    && request.resource.data.bookingStatus == 'PENDING';
+
+      // Status transitions must follow permitted state changes
+      allow update: if isAuthenticated() && (
+        resource.data.customerId == request.auth.uid ||
+        resource.data.salonOwnerId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // --- REVIEWS COLLECTION ---
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.resource.data.customerId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // --- FAVORITES COLLECTION ---
+    match /favorites/{userId}/items/{favoriteId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // --- NOTIFICATIONS COLLECTION ---
+    match /notifications/{notificationId} {
+      allow read, update: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+      allow create: if isAuthenticated();
+      allow delete: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+    }
+
+    // --- USER ADDRESSES COLLECTION ---
+    match /userAddresses/{userId}/items/{addressId} {
+      allow read, write: if isOwner(userId);
+    }
+  }
+}
